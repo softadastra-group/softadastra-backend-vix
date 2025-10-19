@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
+#include <fstream>
 
 namespace adastra::config::env
 {
@@ -50,6 +51,38 @@ namespace adastra::config::env
             std::string s = val;
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             return (s == "1" || s == "true" || s == "yes" || s == "oui");
+        }
+
+        static void loadDotenv(const std::string &file)
+        {
+#ifdef _WIN32
+            auto set_env = [](const std::string &k, const std::string &v)
+            { _putenv_s(k.c_str(), v.c_str()); };
+#else
+            auto set_env = [](const std::string &k, const std::string &v)
+            { setenv(k.c_str(), v.c_str(), 0); };
+#endif
+            std::ifstream in(file);
+            if (!in.is_open())
+                return;
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (line.empty() || line[0] == '#')
+                    continue;
+                auto pos = line.find('=');
+                if (pos == std::string::npos)
+                    continue;
+                std::string key = line.substr(0, pos);
+                std::string val = line.substr(pos + 1);
+                // trim simple
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                val.erase(0, val.find_first_not_of(" \t"));
+                val.erase(val.find_last_not_of(" \t") + 1);
+                if (!key.empty() && std::getenv(key.c_str()) == nullptr)
+                    set_env(key, val);
+            }
         }
     };
 }

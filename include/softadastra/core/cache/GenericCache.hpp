@@ -147,7 +147,8 @@ namespace softadastra::core::cache
                 std::ofstream out(cachePath, std::ios::out | std::ios::trunc);
                 if (out.is_open())
                 {
-                    out.write(cachedJson.data(), cachedJson.size());
+                    out.write(cachedJson.data(),
+                              static_cast<std::streamsize>(cachedJson.size()));
                     out.close();
                 }
             }

@@ -4,17 +4,20 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
-#include <locale>
 
 namespace adastra::utils::string
 {
+
     // Supprime les espaces au début
     inline void ltrim(std::string &s)
     {
-        s.erase(s.begin(),
-                std::find_if(s.begin(), s.end(),
-                             [](unsigned char ch)
-                             { return !std::isspace(ch); }));
+        s.erase(
+            s.begin(),
+            std::find_if(s.begin(), s.end(),
+                         [](unsigned char ch)
+                         {
+                             return !std::isspace(static_cast<unsigned char>(ch));
+                         }));
     }
 
     // Supprime les espaces à la fin
@@ -23,7 +26,9 @@ namespace adastra::utils::string
         s.erase(
             std::find_if(s.rbegin(), s.rend(),
                          [](unsigned char ch)
-                         { return !std::isspace(ch); })
+                         {
+                             return !std::isspace(static_cast<unsigned char>(ch));
+                         })
                 .base(),
             s.end());
     }
@@ -39,8 +44,11 @@ namespace adastra::utils::string
     inline void toLower(std::string &s)
     {
         std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c)
-                       { return std::tolower(c); });
+                       [](unsigned char c) -> char
+                       {
+                           return static_cast<char>(
+                               std::tolower(static_cast<unsigned char>(c)));
+                       });
     }
 
     // Combine les deux : trim + toLower
@@ -56,10 +64,11 @@ namespace adastra::utils::string
     inline std::string capitalizeFirstLetter(const std::string &input)
     {
         if (input.empty())
-            return "";
+            return {};
 
         std::string result = input;
-        result[0] = std::toupper(static_cast<unsigned char>(result[0]));
+        result[0] = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(result[0])));
         return result;
     }
 
@@ -68,6 +77,6 @@ namespace adastra::utils::string
         return capitalizeFirstLetter(trimAndToLower(input));
     }
 
-}
+} // namespace adastra::utils::string
 
 #endif // STRING_UTILS_HPP
