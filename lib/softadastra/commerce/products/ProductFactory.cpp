@@ -5,8 +5,58 @@
 #include <sstream>
 #include <algorithm>
 
+#include <limits>
+
+namespace
+{
+    inline uint32_t json_u32(const nlohmann::json &j, const char *key, uint32_t def = 0)
+    {
+        try
+        {
+            if (!j.contains(key))
+                return def;
+
+            const auto &v = j.at(key);
+            if (v.is_number_unsigned())
+            {
+                auto u = v.get<unsigned long long>();
+                if (u > std::numeric_limits<uint32_t>::max())
+                    return std::numeric_limits<uint32_t>::max();
+                return static_cast<uint32_t>(u);
+            }
+            if (v.is_number_integer())
+            {
+                long long s = v.get<long long>();
+                if (s <= 0)
+                    return 0u;
+                if (s > static_cast<long long>(std::numeric_limits<uint32_t>::max()))
+                    return std::numeric_limits<uint32_t>::max();
+                return static_cast<uint32_t>(s);
+            }
+            if (v.is_string())
+            {
+                // accepte "123" -> 123
+                const auto s = v.get<std::string>();
+                std::size_t pos = 0;
+                unsigned long long u = std::stoull(s, &pos);
+                if (pos != s.size())
+                    return def; // contient des chars non-numériques
+                if (u > std::numeric_limits<uint32_t>::max())
+                    return std::numeric_limits<uint32_t>::max();
+                return static_cast<uint32_t>(u);
+            }
+        }
+        catch (...)
+        {
+            // tombe sur def
+        }
+        return def;
+    }
+}
+
 namespace softadastra::commerce::products
 {
+
     static std::vector<std::string> safeArray(const nlohmann::json &j, const std::string &key)
     {
         if (j.contains(key) && j[key].is_array())
@@ -103,9 +153,9 @@ namespace softadastra::commerce::products
                 .setConditionName(data.value("condition_name", ""))
                 .setBrandName(data.value("brand_name", ""))
                 .setPackageFormatName(data.value("package_format_name", ""))
-                .setCategoryId(data.value("category_id", 0))
-                .setViews(data.value("views", 0))
-                .setReviewCount(data.value("review_count", 0))
+                .setCategoryId(json_u32(data, "category_id"))
+                .setViews(json_u32(data, "views"))
+                .setReviewCount(json_u32(data, "review_count"))
                 .setBoost(data.value("boost", false))
                 .setConvertedPriceValue(data.value("converted_price_value", 0.0f))
                 .setOriginalPrice(data.value("original_price", ""))
@@ -142,7 +192,7 @@ namespace softadastra::commerce::products
         try
         {
             ProductBuilder builder;
-            builder.setId(data.value("id", 0))
+            builder.setId(json_u32(data, "id"))
                 .setTitle(data.value("title", ""))
                 .setImageUrl(data.value("image_url", ""))
                 .setCityName(data.value("city_name", ""))
@@ -156,9 +206,9 @@ namespace softadastra::commerce::products
                 .setConditionName(data.value("condition_name", ""))
                 .setBrandName(data.value("brand_name", ""))
                 .setPackageFormatName(data.value("package_format_name", ""))
-                .setCategoryId(data.value("category_id", 0))
-                .setViews(data.value("views", 0))
-                .setReviewCount(data.value("review_count", 0))
+                .setCategoryId(json_u32(data, "category_id"))
+                .setViews(json_u32(data, "views"))
+                .setReviewCount(json_u32(data, "review_count"))
                 .setBoost(data.value("boost", false))
                 .setConvertedPriceValue(data.value("converted_price_value", 0.0f))
                 .setOriginalPrice(data.value("original_price", ""))

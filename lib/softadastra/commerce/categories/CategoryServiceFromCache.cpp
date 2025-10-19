@@ -54,11 +54,21 @@ namespace softadastra::commerce::categories
             isLeafCacheBuilt_ = true;
         }
 
-        if (offset >= leafCache_.size())
+        const std::size_t n = leafCache_.size();
+        if (offset >= n)
             return {};
 
-        auto end = std::min(leafCache_.size(), offset + limit);
-        return std::vector<Category>(leafCache_.begin() + offset, leafCache_.begin() + end);
+        const std::size_t start_u = offset;
+        const std::size_t end_u = std::min(n, start_u + limit);
+
+        using diff_t = std::vector<Category>::difference_type; // généralement std::ptrdiff_t
+        const diff_t start = static_cast<diff_t>(start_u);
+        const diff_t stop = static_cast<diff_t>(end_u);
+
+        auto first = leafCache_.cbegin() + start;
+        auto last = leafCache_.cbegin() + stop;
+
+        return std::vector<Category>(first, last);
     }
 
     void CategoryServiceFromCache::reloadData(const std::vector<Category> &newData)

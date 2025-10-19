@@ -142,17 +142,15 @@ endif()
 # ---- Now this will succeed because the Boost::* targets exist ----
 find_package(Vix CONFIG REQUIRED)  # provides Vix::vix (and Vix::core internally)
 
-
-# Vix (core-only)
-find_package(Vix CONFIG REQUIRED)  # provides Vix::vix
-
 # ────────────────────────────────────────────────────────────────
 # 📥 Public Headers (two namespaces)
 # ────────────────────────────────────────────────────────────────
-# We expose *both* include/softadastra and include/adastra to all targets via module libs.
 set(SA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(SA_INCLUDE_SOFT "${SA_INCLUDE_DIR}/softadastra")
 set(SA_INCLUDE_ADA  "${SA_INCLUDE_DIR}/adastra")
+
+# ✅ Définir AVANT d’ajouter les sous-projets
+add_compile_definitions(SA_BACKEND_ROOT="${CMAKE_SOURCE_DIR}")
 
 # ────────────────────────────────────────────────────────────────
 # 🧩 Modules (static libs) under lib/
@@ -166,24 +164,20 @@ add_executable(softadastra-backend-vix
   src/main.cpp
 )
 
-# The app should see public headers (through linked modules it already will),
-# but we also add the root include/ to be explicit for main.cpp includes.
-target_include_directories(softadastra-backend-vix
-  PUBLIC
-    "${SA_INCLUDE_DIR}"
+target_include_directories(softadastra-backend-vix PUBLIC "${SA_INCLUDE_DIR}")
+
+target_link_libraries(softadastra-backend-vix PRIVATE
+  sa_core
+  sa_commerce
+  adastra_core
+  adastra_utils
+  Vix::vix
+  Threads::Threads
 )
 
-# Link domain modules (from lib/...), plus Vix core and Threads
-# NOTE: The concrete module targets are defined in lib/*.cmake; adjust if you add/remove modules.
-target_link_libraries(softadastra-backend-vix
-  PRIVATE
-    sa_core
-    sa_commerce
-    adastra_core
-    adastra_utils
-    Vix::vix
-    Threads::Threads
-)
+# (Optionnel mais sûr) redéfinir aussi côté exe
+target_compile_definitions(softadastra-backend-vix PRIVATE SA_BACKEND_ROOT="${CMAKE_SOURCE_DIR}")
+
 
 # Conditionally add crypto/db deps at the APP level if your main uses them.
 if(SA_WITH_OPENSSL AND OpenSSL_FOUND)
