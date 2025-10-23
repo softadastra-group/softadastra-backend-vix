@@ -77,9 +77,16 @@ namespace softadastra::core::cache
 
             if (serialize)
             {
-                nlohmann::json jsonToSave = serialize(data_);
-                cachedJson = jsonToSave.dump(2);
-                saveToFile();
+                if (!data_.empty() || !std::filesystem::exists(cachePath))
+                {
+                    nlohmann::json jsonToSave = serialize(data_);
+                    cachedJson = jsonToSave.dump(2);
+                    saveToFile();
+                }
+                else
+                {
+                    std::cerr << "[GenericCache] Skip save: empty data & file exists\n";
+                }
             }
 
             isLoaded = true;

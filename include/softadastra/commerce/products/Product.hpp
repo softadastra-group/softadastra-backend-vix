@@ -4,8 +4,9 @@
 #include <string>
 #include <vector>
 #include <cstdint>
-#include <nlohmann/json.hpp>
 #include <optional>
+
+#include <vix/json/build.hpp>
 
 using json = nlohmann::json;
 
@@ -78,7 +79,7 @@ namespace softadastra::commerce::products
 
         static Product fromJson(const nlohmann::json &j);
 
-        nlohmann::json toJson() const
+        Vix::json::Json toJson() const
         {
             nlohmann::json j;
             j["id"] = id;

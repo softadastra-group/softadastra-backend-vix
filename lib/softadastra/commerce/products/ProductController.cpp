@@ -7,15 +7,15 @@
 
 #include <adastra/config/env/EnvLoader.hpp>
 #include <adastra/utils/json/JsonUtils.hpp>
-#include <adastra/database/Database.hpp>
 
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <iostream>
-#include <nlohmann/json.hpp>
 
 #include <vix.hpp>
+#include <algorithm>
+#include <cctype>
 
 #include <filesystem>
 
@@ -24,14 +24,122 @@
 #endif
 
 using namespace adastra::utils::json;
+using namespace Vix::json;
 
 namespace softadastra::commerce::products
 {
     static std::unique_ptr<ProductCache> g_productCache;
     static std::once_flag init_flag;
-    static std::once_flag dotenv_flag;
+    [[maybe_unused]] static std::once_flag dotenv_flag;
     [[maybe_unused]] constexpr int DEFAULT_LIMIT = 10;
     [[maybe_unused]] constexpr int DEFAULT_OFFSET = 0;
+
+    static Json product_to_json(const Product &p)
+    {
+        return p.toJson();
+    }
+
+    static inline std::string to_lower_copy(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c)
+                       { return std::tolower(c); });
+        return s;
+    }
+
+    static inline bool looks_like_bool_key(std::string key)
+    {
+        key = to_lower_copy(std::move(key));
+        return key.rfind("is_", 0) == 0 || key.rfind("has_", 0) == 0 || key.rfind("can_", 0) == 0 || key.find("enable") != std::string::npos || key.find("enabled") != std::string::npos || key.find("active") != std::string::npos || key.find("visible") != std::string::npos || key.find("featured") != std::string::npos || key.find("boost") != std::string::npos;
+    }
+
+    static inline void coerce_product_json(Vix::json::Json &obj)
+    {
+        using Json = Vix::json::Json;
+        if (!obj.is_object())
+            return;
+
+        for (auto &[k, v] : obj.items())
+        {
+            const std::string key = k;
+
+            // 0/1 -> bool pour clés "booléennes"
+            if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(key))
+            {
+                v = Json(v.get<int64_t>() != 0);
+                continue;
+            }
+
+            // === RÈGLES SPÉCIFIQUES AUX PRIX / CHAMPS ATTENDUS PAR ProductFactory ===
+
+            // converted_price : DOIT être STRING (même si number ou null)
+            if (key == "converted_price")
+            {
+                if (v.is_null())
+                {
+                    v = Json(std::string{});
+                }
+                else if (v.is_number_float())
+                {
+                    v = Json(std::to_string(v.get<double>()));
+                }
+                else if (v.is_number_integer())
+                {
+                    v = Json(std::to_string((double)v.get<long long>()));
+                }
+                else if (v.is_number_unsigned())
+                {
+                    v = Json(std::to_string((double)v.get<unsigned long long>()));
+                }
+                // si déjà string, on laisse
+                continue;
+            }
+
+            // price, price_with_shipping, shipping_cost_usd, original_price :
+            // - s'ils sont STRING numérique -> double
+            // - s'ils sont null -> garde null (ou adapte si ta Factory exige un type)
+            if (v.is_string())
+            {
+                if (key == "price" || key == "price_with_shipping" || key == "shipping_cost_usd" || key == "original_price")
+                {
+                    try
+                    {
+                        v = Json(std::stod(v.get<std::string>()));
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+            if (key == "original_price" && v.is_null())
+            {
+                // si ta Factory refuse null, convertis en string vide
+                v = Json(std::string{});
+            }
+
+            // average_rating : si null → 0 (si la Factory attend un nombre)
+            if (key == "average_rating" && v.is_null())
+            {
+                v = Json(0);
+            }
+
+            // récursion
+            if (v.is_object())
+                coerce_product_json(v);
+            if (v.is_array())
+                for (auto &e : v)
+                    if (e.is_object())
+                        coerce_product_json(e);
+        }
+    }
+
+    static std::string resolveProductPath(std::string p)
+    {
+        std::filesystem::path pp(p);
+        if (pp.is_relative())
+            pp = std::filesystem::path(SA_BACKEND_ROOT) / pp;
+        return pp.lexically_normal().string();
+    }
 
     void ProductController(Vix::App &app)
     {
@@ -39,8 +147,9 @@ namespace softadastra::commerce::products
         std::call_once(dotenv_flag, []
                        { adastra::config::env::EnvLoader::loadDotenv(std::string(SA_BACKEND_ROOT) + "/.env"); });
 
-        // Lire PRODUCT_JSON_PATH, sinon fallback
         std::string path = adastra::config::env::EnvLoader::get("PRODUCT_JSON_PATH", "");
+        path = resolveProductPath(path); // <<< important: unifie le chemin
+
         if (path.empty())
         {
             std::filesystem::path def = std::filesystem::path(SA_BACKEND_ROOT) / "config" / "data" / "products.json";
@@ -59,8 +168,8 @@ namespace softadastra::commerce::products
         }
 
         // Logs
-        std::cerr << "[ProductController] SA_BACKEND_ROOT=" << SA_BACKEND_ROOT << "\n";
-        std::cerr << "[ProductController] Resolved PRODUCT_JSON_PATH=" << path << "\n";
+        // std::cerr << "[ProductController] SA_BACKEND_ROOT=" << SA_BACKEND_ROOT << "\n";
+        // std::cerr << "[ProductController] Resolved PRODUCT_JSON_PATH=" << path << "\n";
 
         if (!std::filesystem::exists(path))
         {
@@ -70,43 +179,114 @@ namespace softadastra::commerce::products
         std::call_once(
             init_flag, [&]()
             {
-                auto deserializer = [](const nlohmann::json &json) -> std::vector<Product>
-                {
-                    if (!json.contains("data") || !json["data"].is_array())
-                        throw std::runtime_error("key 'data' is missing");
+auto deserializer = [](const Vix::json::Json &json) -> std::vector<Product>
+{
+    using Vix::json::Json;
 
-                    std::vector<Product> products;
-                    for (const auto &item : json["data"])
-                    {
-                        try {
-                            products.push_back(ProductFactory::fromJsonOrThrow(item));
-                        } catch (const std::exception &e) {
-                            std::cerr << "Product ignoré: " << e.what() << std::endl;
-                        }
-                    }
-                    return products;
-                };
+    // --- 1) RACINE stringifiée : "{ \"data\": [...] }" en texte brut
+    Json root = json;
+    if (root.is_string()) {
+        try {
+            root = Json::parse(root.get<std::string>());
+        } catch (...) {
+            throw std::runtime_error("Top-level JSON is a string but cannot be parsed");
+        }
+    }
 
-                auto serializer = [](const std::vector<Product> &products) -> nlohmann::json
-                {
-                    nlohmann::json j;
-                    j["data"] = nlohmann::json::array();
-                    for (const auto &p : products) {
-                        j["data"].push_back(p.toJson());
-                    }
-                    return j;
-                };
+    // --- 2) data peut être un tableau ou ... une chaîne JSON
+    auto parse_maybe_stringified = [](const Json& j) -> Json {
+        if (j.is_string()) {
+            try { return Json::parse(j.get<std::string>()); }
+            catch (...) {}
+        }
+        return j;
+    };
 
-                g_productCache = std::make_unique<ProductCache>(
-                    path,
-                    []() -> std::vector<Product> { return {}; },
-                    serializer,
-                    deserializer
-                ); });
+    // --- 3) coercitions (0/1 -> bool, prix string -> double) inchangé
+    auto to_lower_copy = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        return s;
+    };
+    auto looks_like_bool_key = [&](std::string key) {
+        key = to_lower_copy(std::move(key));
+        return key.rfind("is_",0)==0 || key.rfind("has_",0)==0 || key.rfind("can_",0)==0
+            || key.find("enable")!=std::string::npos || key.find("enabled")!=std::string::npos
+            || key.find("active")!=std::string::npos || key.find("visible")!=std::string::npos
+            || key.find("featured")!=std::string::npos || key.find("boost")!=std::string::npos;
+    };
+    std::function<void(Json&)> coerce = [&](Json& obj){
+        if (!obj.is_object()) return;
+        for (auto& [k, v] : obj.items()) {
+            if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(k)) {
+                v = Json(v.get<int64_t>() != 0);
+                continue;
+            }
+            if (v.is_string()) {
+                if (k=="price" || k=="price_with_shipping" || k=="shipping_cost_usd"
+                 || k=="original_price" || k=="converted_price") {
+                    try { v = Json(std::stod(v.get<std::string>())); } catch (...) {}
+                }
+            }
+            if (v.is_object()) coerce(v);
+            if (v.is_array())  for (auto& e : v) if (e.is_object()) coerce(e);
+        }
+    };
+
+    // --- 4) détecte le tableau de produits
+    const Json* arrPtr = nullptr;
+
+    if (root.is_object() && root.contains("data")) {
+        Json dataNode = parse_maybe_stringified(root["data"]);
+        if (dataNode.is_array()) { root = std::move(dataNode); arrPtr = &root; }
+    }
+    if (!arrPtr && root.is_array()) arrPtr = &root;
+
+    if (!arrPtr) {
+        throw std::runtime_error("Unsupported JSON schema: expected {data:[...]}, {data:\"[...]\"} or [...]");
+    }
+
+    // --- 5) construit les produits
+    std::vector<Product> products;
+    products.reserve(arrPtr->size());
+
+    std::size_t ok = 0, bad = 0;
+    for (auto item : *arrPtr) {
+        try {
+            if (item.is_string()) item = Json::parse(item.get<std::string>());
+            if (item.is_object()) coerce(item);
+            products.push_back(ProductFactory::fromJsonOrThrow(item));
+            ++ok;
+        } catch (const std::exception& e) {
+            ++bad;
+            std::cerr << "[ProductCache] Ignored product: " << e.what() << "\n";
+        }
+    }
+    std::cerr << "[ProductCache] Loaded products ok=" << ok << " bad=" << bad << "\n";
+    return products;
+};
+
+
+
+            auto serializer = [](const std::vector<Product>& products) -> Json
+            {
+                Json arr = Json::array();
+                for (const auto& p : products)
+                    arr.push_back(p.toJson()); // doit retourner Vix::json::Json
+
+                return o("data", arr);
+            };
+
+            g_productCache = std::make_unique<ProductCache>(
+                path,
+                []() -> std::vector<Product> { return {}; },
+                serializer,
+                deserializer
+            ); });
 
         app.post("/api/products/create", [](auto &req, auto &res)
                  {
-            auto body = nlohmann::json::parse(req.body());
+            auto body = Json::parse(req.body());
 
             std::string title   = body.value("title", "");
             std::string content = body.value("content", "");
@@ -122,7 +302,67 @@ namespace softadastra::commerce::products
                 })
             }); });
 
-        app.get("/api/products", [](auto &, auto &res)
-                { res.json({"message", "Product 1"}); });
+        app.get("/api/products/status", [](auto &, auto &res)
+                {
+    try {
+        const auto& items = g_productCache->getAll();
+        res.json(Vix::json::o(
+            "path",  adastra::config::env::EnvLoader::get("PRODUCT_JSON_PATH", ""),
+            "count", items.size()
+        ));
+    } catch (const std::exception& e) {
+        res.status(http::status::internal_server_error)
+           .json(Vix::json::o("error", e.what()));
+    } });
+
+        app.get("/api/products/all", [](auto &, auto &res)
+                {
+            try {
+                const auto& items = g_productCache->getAll();
+                Json arr = Json::array();
+
+                for(const auto& p: items)
+                    arr.push_back(product_to_json(p));
+
+                res.json(o(
+                    "count", items.size(),
+                    "data", arr
+                ));
+            } catch (const std::exception& e) {
+                res.json(o("error", std::string("Invalid cache JSON: ") + e.what()));
+            } });
+
+        app.get("/api/products/first", [](auto &, auto &res)
+                {
+        const auto& items = g_productCache->getAll();
+        if (items.empty()) {
+            res.json(Vix::json::o("empty", true));
+            return;
+        }
+        res.json(Vix::json::o("sample", product_to_json(items.front()))); });
+
+        app.post("/api/products/reload", [](auto &, auto &res)
+                 {
+        try {
+            g_productCache->reload(); // force loadFromFile()
+            const auto& items = g_productCache->getAll();
+            res.json(Vix::json::o("reloaded", true, "count", items.size()));
+        } catch (const std::exception& e) {
+            res.status(http::status::internal_server_error)
+            .json(Vix::json::o("error", e.what()));
+        } });
+
+        app.get("/api/products/raw", [path](auto &, auto &res)
+                {
+    try {
+        std::ifstream in(path);
+        std::string s((std::istreambuf_iterator<char>(in)), {});
+        std::string head = s.substr(0, 400);
+        res.json(Vix::json::o("path", path, "head", head, "size", (long long)s.size()));
+    } catch (const std::exception& e) {
+        res.status(http::status::internal_server_error)
+           .json(Vix::json::o("error", e.what(), "path", path));
+    } });
     }
+
 }
