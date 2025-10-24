@@ -18,6 +18,7 @@
 #include <cctype>
 
 #include <filesystem>
+#include <unordered_set>
 
 #ifndef SA_BACKEND_ROOT
 #define SA_BACKEND_ROOT ""
@@ -59,77 +60,66 @@ namespace softadastra::commerce::products
         if (!obj.is_object())
             return;
 
-        for (auto &[k, v] : obj.items())
-        {
-            const std::string key = k;
+        static const std::unordered_set<std::string> price_keys = {
+            "price", "price_with_shipping", "shipping_cost_usd", "original_price"};
 
-            // 0/1 -> bool pour clés "booléennes"
-            if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(key))
+        for (auto &[key, value] : obj.items())
+        {
+            if (value.is_object())
             {
-                v = Json(v.get<int64_t>() != 0);
+                coerce_product_json(value);
+                continue;
+            }
+            if (value.is_array())
+            {
+                for (auto &element : value)
+                    if (element.is_object())
+                        coerce_product_json(element);
                 continue;
             }
 
-            // === RÈGLES SPÉCIFIQUES AUX PRIX / CHAMPS ATTENDUS PAR ProductFactory ===
+            if ((value.is_number_integer() || value.is_number_unsigned()) && looks_like_bool_key(key))
+            {
+                value = Json(value.get<int64_t>() != 0);
+                continue;
+            }
 
-            // converted_price : DOIT être STRING (même si number ou null)
             if (key == "converted_price")
             {
-                if (v.is_null())
+                if (value.is_null())
                 {
-                    v = Json(std::string{});
+                    value = Json(std::string{});
                 }
-                else if (v.is_number_float())
+                else if (value.is_number())
                 {
-                    v = Json(std::to_string(v.get<double>()));
+                    value = Json(std::to_string(value.get<double>()));
                 }
-                else if (v.is_number_integer())
-                {
-                    v = Json(std::to_string((double)v.get<long long>()));
-                }
-                else if (v.is_number_unsigned())
-                {
-                    v = Json(std::to_string((double)v.get<unsigned long long>()));
-                }
-                // si déjà string, on laisse
                 continue;
             }
 
-            // price, price_with_shipping, shipping_cost_usd, original_price :
-            // - s'ils sont STRING numérique -> double
-            // - s'ils sont null -> garde null (ou adapte si ta Factory exige un type)
-            if (v.is_string())
+            if (value.is_string() && price_keys.find(key) != price_keys.end())
             {
-                if (key == "price" || key == "price_with_shipping" || key == "shipping_cost_usd" || key == "original_price")
+                try
                 {
-                    try
-                    {
-                        v = Json(std::stod(v.get<std::string>()));
-                    }
-                    catch (...)
-                    {
-                    }
+                    value = Json(std::stod(value.get<std::string>()));
                 }
-            }
-            if (key == "original_price" && v.is_null())
-            {
-                // si ta Factory refuse null, convertis en string vide
-                v = Json(std::string{});
-            }
-
-            // average_rating : si null → 0 (si la Factory attend un nombre)
-            if (key == "average_rating" && v.is_null())
-            {
-                v = Json(0);
+                catch (const std::exception &)
+                {
+                }
+                continue;
             }
 
-            // récursion
-            if (v.is_object())
-                coerce_product_json(v);
-            if (v.is_array())
-                for (auto &e : v)
-                    if (e.is_object())
-                        coerce_product_json(e);
+            if (key == "original_price" && value.is_null())
+            {
+                value = Json(std::string{});
+                continue;
+            }
+
+            if (key == "average_rating" && value.is_null())
+            {
+                value = Json(0);
+                continue;
+            }
         }
     }
 
@@ -148,7 +138,7 @@ namespace softadastra::commerce::products
                        { adastra::config::env::EnvLoader::loadDotenv(std::string(SA_BACKEND_ROOT) + "/.env"); });
 
         std::string path = adastra::config::env::EnvLoader::get("PRODUCT_JSON_PATH", "");
-        path = resolveProductPath(path); // <<< important: unifie le chemin
+        path = resolveProductPath(path);
 
         if (path.empty())
         {
@@ -157,7 +147,6 @@ namespace softadastra::commerce::products
             std::cerr << "[ProductController] PRODUCT_JSON_PATH non défini, fallback: " << path << "\n";
         }
 
-        // Résoudre les chemins RELATIFS par rapport à SA_BACKEND_ROOT
         {
             std::filesystem::path p(path);
             if (p.is_relative())
@@ -167,10 +156,6 @@ namespace softadastra::commerce::products
             path = p.lexically_normal().string();
         }
 
-        // Logs
-        // std::cerr << "[ProductController] SA_BACKEND_ROOT=" << SA_BACKEND_ROOT << "\n";
-        // std::cerr << "[ProductController] Resolved PRODUCT_JSON_PATH=" << path << "\n";
-
         if (!std::filesystem::exists(path))
         {
             throw std::runtime_error(std::string("PRODUCT_JSON_PATH introuvable: ") + path);
@@ -179,92 +164,92 @@ namespace softadastra::commerce::products
         std::call_once(
             init_flag, [&]()
             {
-auto deserializer = [](const Vix::json::Json &json) -> std::vector<Product>
-{
-    using Vix::json::Json;
+        auto deserializer = [](const Vix::json::Json &json) -> std::vector<Product>
+        {
+            using Vix::json::Json;
 
-    // --- 1) RACINE stringifiée : "{ \"data\": [...] }" en texte brut
-    Json root = json;
-    if (root.is_string()) {
-        try {
-            root = Json::parse(root.get<std::string>());
-        } catch (...) {
-            throw std::runtime_error("Top-level JSON is a string but cannot be parsed");
-        }
-    }
-
-    // --- 2) data peut être un tableau ou ... une chaîne JSON
-    auto parse_maybe_stringified = [](const Json& j) -> Json {
-        if (j.is_string()) {
-            try { return Json::parse(j.get<std::string>()); }
-            catch (...) {}
-        }
-        return j;
-    };
-
-    // --- 3) coercitions (0/1 -> bool, prix string -> double) inchangé
-    auto to_lower_copy = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c){ return std::tolower(c); });
-        return s;
-    };
-    auto looks_like_bool_key = [&](std::string key) {
-        key = to_lower_copy(std::move(key));
-        return key.rfind("is_",0)==0 || key.rfind("has_",0)==0 || key.rfind("can_",0)==0
-            || key.find("enable")!=std::string::npos || key.find("enabled")!=std::string::npos
-            || key.find("active")!=std::string::npos || key.find("visible")!=std::string::npos
-            || key.find("featured")!=std::string::npos || key.find("boost")!=std::string::npos;
-    };
-    std::function<void(Json&)> coerce = [&](Json& obj){
-        if (!obj.is_object()) return;
-        for (auto& [k, v] : obj.items()) {
-            if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(k)) {
-                v = Json(v.get<int64_t>() != 0);
-                continue;
-            }
-            if (v.is_string()) {
-                if (k=="price" || k=="price_with_shipping" || k=="shipping_cost_usd"
-                 || k=="original_price" || k=="converted_price") {
-                    try { v = Json(std::stod(v.get<std::string>())); } catch (...) {}
+            // --- 1) RACINE stringifiée : "{ \"data\": [...] }" en texte brut
+            Json root = json;
+            if (root.is_string()) {
+                try {
+                    root = Json::parse(root.get<std::string>());
+                } catch (...) {
+                    throw std::runtime_error("Top-level JSON is a string but cannot be parsed");
                 }
             }
-            if (v.is_object()) coerce(v);
-            if (v.is_array())  for (auto& e : v) if (e.is_object()) coerce(e);
-        }
-    };
 
-    // --- 4) détecte le tableau de produits
-    const Json* arrPtr = nullptr;
+            // --- 2) data peut être un tableau ou ... une chaîne JSON
+            auto parse_maybe_stringified = [](const Json& j) -> Json {
+                if (j.is_string()) {
+                    try { return Json::parse(j.get<std::string>()); }
+                    catch (...) {}
+                }
+                return j;
+            };
 
-    if (root.is_object() && root.contains("data")) {
-        Json dataNode = parse_maybe_stringified(root["data"]);
-        if (dataNode.is_array()) { root = std::move(dataNode); arrPtr = &root; }
-    }
-    if (!arrPtr && root.is_array()) arrPtr = &root;
+            // --- 3) coercitions (0/1 -> bool, prix string -> double) inchangé
+            auto to_lower_copy = [](std::string s) {
+                std::transform(s.begin(), s.end(), s.begin(),
+                            [](unsigned char c){ return std::tolower(c); });
+                return s;
+            };
+            auto looks_like_bool_key = [&](std::string key) {
+                key = to_lower_copy(std::move(key));
+                return key.rfind("is_",0)==0 || key.rfind("has_",0)==0 || key.rfind("can_",0)==0
+                    || key.find("enable")!=std::string::npos || key.find("enabled")!=std::string::npos
+                    || key.find("active")!=std::string::npos || key.find("visible")!=std::string::npos
+                    || key.find("featured")!=std::string::npos || key.find("boost")!=std::string::npos;
+            };
+            std::function<void(Json&)> coerce = [&](Json& obj){
+                if (!obj.is_object()) return;
+                for (auto& [k, v] : obj.items()) {
+                    if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(k)) {
+                        v = Json(v.get<int64_t>() != 0);
+                        continue;
+                    }
+                    if (v.is_string()) {
+                        if (k=="price" || k=="price_with_shipping" || k=="shipping_cost_usd"
+                        || k=="original_price" || k=="converted_price") {
+                            try { v = Json(std::stod(v.get<std::string>())); } catch (...) {}
+                        }
+                    }
+                    if (v.is_object()) coerce(v);
+                    if (v.is_array())  for (auto& e : v) if (e.is_object()) coerce(e);
+                }
+            };
 
-    if (!arrPtr) {
-        throw std::runtime_error("Unsupported JSON schema: expected {data:[...]}, {data:\"[...]\"} or [...]");
-    }
+            // --- 4) détecte le tableau de produits
+            const Json* arrPtr = nullptr;
 
-    // --- 5) construit les produits
-    std::vector<Product> products;
-    products.reserve(arrPtr->size());
+            if (root.is_object() && root.contains("data")) {
+                Json dataNode = parse_maybe_stringified(root["data"]);
+                if (dataNode.is_array()) { root = std::move(dataNode); arrPtr = &root; }
+            }
+            if (!arrPtr && root.is_array()) arrPtr = &root;
 
-    std::size_t ok = 0, bad = 0;
-    for (auto item : *arrPtr) {
-        try {
-            if (item.is_string()) item = Json::parse(item.get<std::string>());
-            if (item.is_object()) coerce(item);
-            products.push_back(ProductFactory::fromJsonOrThrow(item));
-            ++ok;
-        } catch (const std::exception& e) {
-            ++bad;
-            std::cerr << "[ProductCache] Ignored product: " << e.what() << "\n";
-        }
-    }
-    std::cerr << "[ProductCache] Loaded products ok=" << ok << " bad=" << bad << "\n";
-    return products;
-};
+            if (!arrPtr) {
+                throw std::runtime_error("Unsupported JSON schema: expected {data:[...]}, {data:\"[...]\"} or [...]");
+            }
+
+            // --- 5) construit les produits
+            std::vector<Product> products;
+            products.reserve(arrPtr->size());
+
+            std::size_t ok = 0, bad = 0;
+            for (auto item : *arrPtr) {
+                try {
+                    if (item.is_string()) item = Json::parse(item.get<std::string>());
+                    if (item.is_object()) coerce(item);
+                    products.push_back(ProductFactory::fromJsonOrThrow(item));
+                    ++ok;
+                } catch (const std::exception& e) {
+                    ++bad;
+                    std::cerr << "[ProductCache] Ignored product: " << e.what() << "\n";
+                }
+            }
+            std::cerr << "[ProductCache] Loaded products ok=" << ok << " bad=" << bad << "\n";
+            return products;
+        };
 
 
 
@@ -272,7 +257,7 @@ auto deserializer = [](const Vix::json::Json &json) -> std::vector<Product>
             {
                 Json arr = Json::array();
                 for (const auto& p : products)
-                    arr.push_back(p.toJson()); // doit retourner Vix::json::Json
+                    arr.push_back(p.toJson()); 
 
                 return o("data", arr);
             };
