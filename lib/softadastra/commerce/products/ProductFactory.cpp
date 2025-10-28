@@ -6,6 +6,8 @@
 #include <algorithm>
 
 #include <limits>
+#include <iomanip> // std::setprecision
+#include <sstream> // std::ostringstream
 
 namespace
 {
@@ -51,6 +53,42 @@ namespace
             // tombe sur def
         }
         return def;
+    }
+
+    static std::string as_string_flexible(const nlohmann::json &j, const char *key)
+    {
+        if (!j.contains(key))
+            return std::string{};
+        const auto &v = j.at(key);
+        if (v.is_string())
+            return v.get<std::string>();
+        if (v.is_number())
+        {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2) << v.get<double>();
+            return oss.str();
+        }
+        // null, bool, array, object -> vide
+        return std::string{};
+    }
+
+    static float as_float_or(const nlohmann::json &j, const char *key, float defv = 0.0f)
+    {
+        try
+        {
+            if (!j.contains(key) || j.at(key).is_null())
+                return defv;
+            if (j.at(key).is_number_float())
+                return j.at(key).get<float>();
+            if (j.at(key).is_number_integer())
+                return static_cast<float>(j.at(key).get<long long>());
+            if (j.at(key).is_string())
+                return std::stof(j.at(key).get<std::string>());
+        }
+        catch (...)
+        {
+        }
+        return defv;
     }
 }
 
@@ -127,10 +165,8 @@ namespace softadastra::commerce::products
     {
         try
         {
-            // ✅ Validation en contexte "create" (pas d'id requis)
             ProductValidator::validate(data, "createFromJson");
 
-            // 1) Normaliser sizes/colors (split CSV + trim + dédup)
             auto sizes = normalizeCsvArray(safeArray(data, "sizes"));
             auto colors = normalizeCsvArray(safeArray(data, "colors"));
 
@@ -146,7 +182,7 @@ namespace softadastra::commerce::products
                 .setCountryImageUrl(data.value("country_image_url", ""))
                 .setCurrency(data.value("currency", ""))
                 .setFormattedPrice(data.value("formatted_price", ""))
-                .setConvertedPrice(data.value("converted_price", ""))
+                .setConvertedPrice(as_string_flexible(data, "converted_price"))
                 .setPriceWithShipping(data.value("price_with_shipping_value", 0.0f))
                 .setSizes(sizes)
                 .setColors(colors)
@@ -158,8 +194,8 @@ namespace softadastra::commerce::products
                 .setReviewCount(json_u32(data, "review_count"))
                 .setBoost(data.value("boost", false))
                 .setConvertedPriceValue(data.value("converted_price_value", 0.0f))
-                .setOriginalPrice(data.value("original_price", ""))
-                .setAverageRating(data.value("average_rating", 0.0f));
+                .setOriginalPrice(as_string_flexible(data, "original_price"))
+                .setAverageRating(as_float_or(data, "average_rating", 0.0f));
 
             if (data.contains("similar_products") && data["similar_products"].is_array())
             {
@@ -199,7 +235,7 @@ namespace softadastra::commerce::products
                 .setCountryImageUrl(data.value("country_image_url", ""))
                 .setCurrency(data.value("currency", ""))
                 .setFormattedPrice(data.value("formatted_price", ""))
-                .setConvertedPrice(data.value("converted_price", ""))
+                .setConvertedPrice(as_string_flexible(data, "converted_price"))
                 .setPriceWithShipping(data.value("price_with_shipping_value", 0.0f))
                 .setSizes(safeArray(data, "sizes"))
                 .setColors(safeArray(data, "colors"))
@@ -211,8 +247,8 @@ namespace softadastra::commerce::products
                 .setReviewCount(json_u32(data, "review_count"))
                 .setBoost(data.value("boost", false))
                 .setConvertedPriceValue(data.value("converted_price_value", 0.0f))
-                .setOriginalPrice(data.value("original_price", ""))
-                .setAverageRating(data.value("average_rating", 0.0f));
+                .setOriginalPrice(as_string_flexible(data, "original_price"))
+                .setAverageRating(as_float_or(data, "average_rating", 0.0f));
 
             if (data.contains("similar_products") && data["similar_products"].is_array())
             {
