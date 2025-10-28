@@ -20,8 +20,16 @@
 #include <filesystem>
 #include <unordered_set>
 
+#include <cstdint> // int64_t
+
 #ifndef SA_BACKEND_ROOT
 #define SA_BACKEND_ROOT ""
+#endif
+
+#if __cplusplus >= 202002L
+#define HAS_KEY(set, key) ((set).contains(key))
+#else
+#define HAS_KEY(set, key) ((set).find(key) != (set).end())
 #endif
 
 using namespace adastra::utils::json;
@@ -40,7 +48,7 @@ namespace softadastra::commerce::products
         return p.toJson();
     }
 
-    static inline std::string to_lower_copy(std::string s)
+    [[maybe_unused]] inline std::string to_lower_copy(std::string s)
     {
         std::transform(s.begin(), s.end(), s.begin(),
                        [](unsigned char c)
@@ -48,23 +56,37 @@ namespace softadastra::commerce::products
         return s;
     }
 
-    static inline bool looks_like_bool_key(std::string key)
+    inline bool looks_like_bool_key(const std::string &key)
     {
-        key = to_lower_copy(std::move(key));
-        return key.rfind("is_", 0) == 0 || key.rfind("has_", 0) == 0 || key.rfind("can_", 0) == 0 || key.find("enable") != std::string::npos || key.find("enabled") != std::string::npos || key.find("active") != std::string::npos || key.find("visible") != std::string::npos || key.find("featured") != std::string::npos || key.find("boost") != std::string::npos;
+        auto lower = key;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c)
+                       { return static_cast<char>(std::tolower(c)); });
+
+        auto starts_with = [&](const char *pfx)
+        {
+            return lower.rfind(pfx, 0) == 0; // prefix
+        };
+        return starts_with("is_") || starts_with("has_") || starts_with("can_") || lower.find("enable") != std::string::npos || lower.find("enabled") != std::string::npos || lower.find("active") != std::string::npos || lower.find("visible") != std::string::npos || lower.find("featured") != std::string::npos || lower.find("boost") != std::string::npos;
     }
 
-    static inline void coerce_product_json(Vix::json::Json &obj)
+    // ----------------------------------------------------------------------
+    // La fonction de coercition :
+    // ----------------------------------------------------------------------
+    [[maybe_unused]] inline void coerce_product_json(Vix::json::Json &obj)
     {
         using Json = Vix::json::Json;
         if (!obj.is_object())
             return;
 
         static const std::unordered_set<std::string> price_keys = {
-            "price", "price_with_shipping", "shipping_cost_usd", "original_price"};
+            "price", "price_with_shipping", "shipping_cost_usd", "original_price"
+            // ⚠️ volontairement SANS "converted_price"
+        };
 
         for (auto &[key, value] : obj.items())
         {
+            // Descente récursive
             if (value.is_object())
             {
                 coerce_product_json(value);
@@ -78,12 +100,14 @@ namespace softadastra::commerce::products
                 continue;
             }
 
+            // 0/1 -> bool pour les clés "is_", "has_", ...
             if ((value.is_number_integer() || value.is_number_unsigned()) && looks_like_bool_key(key))
             {
                 value = Json(value.get<int64_t>() != 0);
                 continue;
             }
 
+            // converted_price doit être STRING dans ton modèle actuel
             if (key == "converted_price")
             {
                 if (value.is_null())
@@ -94,10 +118,12 @@ namespace softadastra::commerce::products
                 {
                     value = Json(std::to_string(value.get<double>()));
                 }
+                // si string, on ne touche pas
                 continue;
             }
 
-            if (value.is_string() && price_keys.find(key) != price_keys.end())
+            // Autres prix : si STRING -> DOUBLE
+            if (value.is_string() && HAS_KEY(price_keys, key))
             {
                 try
                 {
@@ -105,10 +131,12 @@ namespace softadastra::commerce::products
                 }
                 catch (const std::exception &)
                 {
+                    // ignore invalid numeric conversion
                 }
                 continue;
             }
 
+            // Champs optionnels null -> valeur sûre
             if (key == "original_price" && value.is_null())
             {
                 value = Json(std::string{});
@@ -168,7 +196,6 @@ namespace softadastra::commerce::products
         {
             using Vix::json::Json;
 
-            // --- 1) RACINE stringifiée : "{ \"data\": [...] }" en texte brut
             Json root = json;
             if (root.is_string()) {
                 try {
@@ -178,7 +205,6 @@ namespace softadastra::commerce::products
                 }
             }
 
-            // --- 2) data peut être un tableau ou ... une chaîne JSON
             auto parse_maybe_stringified = [](const Json& j) -> Json {
                 if (j.is_string()) {
                     try { return Json::parse(j.get<std::string>()); }
@@ -187,43 +213,73 @@ namespace softadastra::commerce::products
                 return j;
             };
 
-            // --- 3) coercitions (0/1 -> bool, prix string -> double) inchangé
             auto to_lower_copy = [](std::string s) {
                 std::transform(s.begin(), s.end(), s.begin(),
-                            [](unsigned char c){ return std::tolower(c); });
+                            [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
                 return s;
             };
+
             auto looks_like_bool_key = [&](std::string key) {
                 key = to_lower_copy(std::move(key));
-                return key.rfind("is_",0)==0 || key.rfind("has_",0)==0 || key.rfind("can_",0)==0
-                    || key.find("enable")!=std::string::npos || key.find("enabled")!=std::string::npos
-                    || key.find("active")!=std::string::npos || key.find("visible")!=std::string::npos
-                    || key.find("featured")!=std::string::npos || key.find("boost")!=std::string::npos;
+                auto starts_with = [&](const char* pfx){ return key.rfind(pfx, 0) == 0; };
+                return starts_with("is_") || starts_with("has_") || starts_with("can_")
+                    || key.find("enable")   != std::string::npos
+                    || key.find("enabled")  != std::string::npos
+                    || key.find("active")   != std::string::npos
+                    || key.find("visible")  != std::string::npos
+                    || key.find("featured") != std::string::npos
+                    || key.find("boost")    != std::string::npos;
             };
+
+            static const std::unordered_set<std::string> price_keys = {
+                "price", "price_with_shipping", "shipping_cost_usd", "original_price"
+            };
+
             std::function<void(Json&)> coerce = [&](Json& obj){
                 if (!obj.is_object()) return;
+
                 for (auto& [k, v] : obj.items()) {
+                    if (v.is_object()) { coerce(v); continue; }
+                    if (v.is_array())  { for (auto& e : v) if (e.is_object()) coerce(e); continue; }
+
                     if ((v.is_number_integer() || v.is_number_unsigned()) && looks_like_bool_key(k)) {
                         v = Json(v.get<int64_t>() != 0);
                         continue;
                     }
-                    if (v.is_string()) {
-                        if (k=="price" || k=="price_with_shipping" || k=="shipping_cost_usd"
-                        || k=="original_price" || k=="converted_price") {
-                            try { v = Json(std::stod(v.get<std::string>())); } catch (...) {}
+
+                    if (k == "converted_price") {
+                        if (v.is_null()) {
+                            v = Json(std::string{});
+                        } else if (v.is_number()) {
+                            v = Json(std::to_string(v.get<double>()));
                         }
+                        continue;
                     }
-                    if (v.is_object()) coerce(v);
-                    if (v.is_array())  for (auto& e : v) if (e.is_object()) coerce(e);
+
+                    if (v.is_string() && price_keys.find(k) != price_keys.end()) {
+                        try { v = Json(std::stod(v.get<std::string>())); } catch (...) {}
+                        continue;
+                    }
+
+                    if (k == "original_price" && v.is_null()) {
+                        v = Json(std::string{});
+                        continue;
+                    }
+                    if (k == "average_rating" && v.is_null()) {
+                        v = Json(0);
+                        continue;
+                    }
                 }
             };
 
-            // --- 4) détecte le tableau de produits
             const Json* arrPtr = nullptr;
 
             if (root.is_object() && root.contains("data")) {
                 Json dataNode = parse_maybe_stringified(root["data"]);
-                if (dataNode.is_array()) { root = std::move(dataNode); arrPtr = &root; }
+                if (dataNode.is_array()) {
+                    root = std::move(dataNode);
+                    arrPtr = &root;
+                }
             }
             if (!arrPtr && root.is_array()) arrPtr = &root;
 
@@ -231,7 +287,6 @@ namespace softadastra::commerce::products
                 throw std::runtime_error("Unsupported JSON schema: expected {data:[...]}, {data:\"[...]\"} or [...]");
             }
 
-            // --- 5) construit les produits
             std::vector<Product> products;
             products.reserve(arrPtr->size());
 
@@ -239,7 +294,10 @@ namespace softadastra::commerce::products
             for (auto item : *arrPtr) {
                 try {
                     if (item.is_string()) item = Json::parse(item.get<std::string>());
-                    if (item.is_object()) coerce(item);
+
+                    if (item.is_object())
+                        coerce(item);
+
                     products.push_back(ProductFactory::fromJsonOrThrow(item));
                     ++ok;
                 } catch (const std::exception& e) {
@@ -250,8 +308,6 @@ namespace softadastra::commerce::products
             std::cerr << "[ProductCache] Loaded products ok=" << ok << " bad=" << bad << "\n";
             return products;
         };
-
-
 
             auto serializer = [](const std::vector<Product>& products) -> Json
             {
